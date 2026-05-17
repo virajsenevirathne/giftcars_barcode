@@ -427,19 +427,45 @@ function renderGrouped(container, list) {
     `;
     const stack = document.createElement('div');
     stack.className = 'stack';
+    if (items.length === 1) stack.classList.add('single');
 
-    // Used cards are at the back of the stack (drawn first, smaller, deeper offset)
+    const drop = 26;                    // px each card peeks above the one in front
+    const visibleDepth = Math.min(items.length - 1, 4);
+    const maxPeek = visibleDepth * drop;
+
     items.forEach((c, idx) => {
       const card = makeCardEl(c);
-      // Z-index: unused on top
-      const depthIdx = c.used ? idx + items.length : idx;
-      const offsetY = idx * 8;
-      const offsetX = (idx - (items.length - 1) / 2) * 4;
-      const scale = 1 - idx * 0.025;
-      card.style.zIndex = String(1000 - depthIdx);
-      card.style.transform = `translateX(calc(-50% + ${offsetX}px)) translateY(${offsetY}px) scale(${scale})`;
+      // Beyond visibleDepth we collapse — cards stay glued behind the deepest visible one
+      const depth = Math.min(idx, visibleDepth);
+      const offsetY = maxPeek - depth * drop;
+      const fanDir  = depth === 0 ? 0 : (depth % 2 === 0 ? -1 : 1);
+      const fanStep = Math.ceil(depth / 2);
+      const offsetX = fanDir * fanStep * 6;
+      const rotate  = fanDir * fanStep * 1.4;
+      const scale   = 1 - depth * 0.03;
+
+      card.style.zIndex = String(1000 - idx);
+      card.style.transform =
+        `translateY(${offsetY}px) translateX(${offsetX}px) rotate(${rotate}deg) scale(${scale})`;
+
+      // Hide content of cards buried deeper than visibleDepth to keep things tidy
+      if (idx > visibleDepth) card.style.opacity = '0';
+
       stack.appendChild(card);
     });
+
+    // Stack height adapts to whether the deck is QR or barcode (barcode cards are shorter).
+    const stackHasBarcode = items.some(i => i.format && i.format !== 'QR_CODE');
+    const cardH = stackHasBarcode ? 180 : 270;
+    stack.style.height = `${cardH + maxPeek}px`;
+
+    // Stack count badge on front (when 2+)
+    if (items.length > 1) {
+      const badge = document.createElement('div');
+      badge.className = 'stack-count';
+      badge.textContent = `${items.length}`;
+      stack.appendChild(badge);
+    }
 
     groupEl.appendChild(stack);
     container.appendChild(groupEl);

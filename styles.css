@@ -202,16 +202,36 @@ body { padding-top: var(--safe-top); padding-bottom: var(--safe-bottom); }
 }
 .stack {
   position: relative;
-  height: 260px;
-  perspective: 1000px;
+  width: 220px;
+  margin: 0 auto;
+  perspective: 1200px;
 }
 .stack .card {
-  position: absolute; top: 0; left: 50%;
-  width: 200px;
+  position: absolute;
+  top: 0; left: 0;
+  width: 220px;
   transform-origin: center bottom;
-  transition: transform .3s ease, opacity .3s ease;
+  transition: transform .3s cubic-bezier(.2,.7,.2,1.2), opacity .3s ease;
+  /* Stronger shadow gives clearer separation between layers */
+  box-shadow: 0 14px 28px rgba(0,0,0,.45), 0 2px 6px rgba(0,0,0,.3);
 }
 .stack .card .card-qr { aspect-ratio: 1/1; }
+.stack .card.is-barcode .card-qr { aspect-ratio: auto; height: 110px; }
+
+/* Stack count badge — small chip on the top-right corner of the deck */
+.stack-count {
+  position: absolute;
+  top: -8px; right: -6px;
+  z-index: 2000;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: white;
+  font-size: 11px; font-weight: 800;
+  padding: 4px 9px;
+  border-radius: 999px;
+  box-shadow: 0 4px 10px rgba(0,0,0,.45);
+  pointer-events: none;
+}
+.stack.single .stack-count { display: none; }
 
 /* ---- Modal ---- */
 .modal { position: fixed; inset: 0; z-index: 100; display: flex; align-items: flex-end; justify-content: center; }
