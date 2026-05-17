@@ -1,0 +1,24 @@
+{
+  "name": "Gift Card Wallet",
+  "short_name": "GC Wallet",
+  "description": "Import gift card QR codes from PDFs and use them anywhere.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0b1020",
+  "theme_color": "#111827",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' rx='36' fill='%236366f1'/><text x='50%25' y='58%25' font-size='110' text-anchor='middle' font-family='Apple Color Emoji,Segoe UI Emoji,sans-serif'>🎁</text></svg>",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='96' fill='%236366f1'/><text x='50%25' y='58%25' font-size='300' text-anchor='middle' font-family='Apple Color Emoji,Segoe UI Emoji,sans-serif'>🎁</text></svg>",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

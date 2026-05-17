@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#111827" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Gift Card Wallet</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="totals">
+      <div class="total-label">Available balance</div>
+      <div class="total-value" id="totalValue">$0</div>
+      <div class="total-sub" id="totalSub">0 of 0 cards available</div>
+    </div>
+    <div class="actions">
+      <button id="groupBtn" class="btn ghost" title="Group by value">
+        <span class="icon">▦</span><span class="lbl">Group</span>
+      </button>
+      <label class="btn primary" for="pdfInput">
+        <span class="icon">＋</span><span class="lbl">Import PDF</span>
+      </label>
+      <input id="pdfInput" type="file" accept="application/pdf" multiple hidden />
+      <button id="menuBtn" class="btn ghost icon-only" title="Menu">⋯</button>
+    </div>
+  </header>
+
+  <div id="importStatus" class="import-status hidden"></div>
+
+  <main id="wallet" class="wallet">
+    <div id="emptyState" class="empty-state">
+      <div class="empty-emoji">🎁</div>
+      <h2>No gift cards yet</h2>
+      <p>Tap <b>Import PDF</b> to scan vouchers from your PDFs.<br/>QR codes &amp; values are detected automatically.</p>
+    </div>
+    <div id="cards" class="cards"></div>
+  </main>
+
+  <!-- QR fullscreen modal -->
+  <div id="qrModal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-sheet">
+      <button class="modal-close" data-close aria-label="Close">×</button>
+      <div class="modal-value" id="modalValue">$0</div>
+      <div class="modal-qr-wrap">
+        <div id="modalQr" class="modal-qr"></div>
+      </div>
+      <div class="modal-data" id="modalData"></div>
+      <div class="modal-actions">
+        <button class="btn ghost" id="editValueBtn">Edit value</button>
+        <button class="btn ghost" id="toggleUsedBtn">Mark used</button>
+        <button class="btn danger" id="deleteBtn">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Menu sheet -->
+  <div id="menuSheet" class="modal hidden">
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-sheet small">
+      <button class="modal-close" data-close>×</button>
+      <h3>Settings</h3>
+      <div class="menu-row">
+        <span>Show used cards</span>
+        <input type="checkbox" id="showUsedToggle" checked />
+      </div>
+      <div class="menu-row">
+        <button class="btn ghost full" id="exportBtn">Export backup (JSON)</button>
+      </div>
+      <div class="menu-row">
+        <label class="btn ghost full" for="importBackup">Import backup (JSON)</label>
+        <input id="importBackup" type="file" accept="application/json" hidden />
+      </div>
+      <div class="menu-row">
+        <button class="btn danger full" id="resetUsedBtn">Reset all to unused</button>
+      </div>
+      <div class="menu-row">
+        <button class="btn danger full" id="clearAllBtn">Delete all cards</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Value prompt modal -->
+  <div id="valueModal" class="modal hidden">
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-sheet small">
+      <button class="modal-close" data-close>×</button>
+      <h3 id="valueModalTitle">Set value</h3>
+      <p class="muted" id="valueModalSub">Couldn't detect a value. Enter it manually:</p>
+      <div class="value-input-row">
+        <span class="currency">$</span>
+        <input type="number" id="valueInput" min="0" step="1" placeholder="50" inputmode="numeric" />
+      </div>
+      <div class="quick-values">
+        <button class="chip" data-v="10">$10</button>
+        <button class="chip" data-v="20">$20</button>
+        <button class="chip" data-v="25">$25</button>
+        <button class="chip" data-v="30">$30</button>
+        <button class="chip" data-v="50">$50</button>
+        <button class="chip" data-v="100">$100</button>
+      </div>
+      <div class="modal-actions">
+        <button class="btn ghost" data-close>Cancel</button>
+        <button class="btn primary" id="valueOkBtn">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Libraries (CDN) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+  <script>
+    if (window.pdfjsLib) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc =
+        'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    }
+  </script>
+  <script src="app.js"></script>
+</body>
+</html>
