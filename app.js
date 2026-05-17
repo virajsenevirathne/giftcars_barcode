@@ -80,12 +80,13 @@ async function importFiles(files) {
     return;
   }
 
-  // Phase 1: scan every PDF, collect all detected codes (no prompts yet)
+  // Phase 1: scan every PDF, collect all detected codes (no prompts yet).
+  // Sequential — running 10+ PDFs in parallel blows mobile memory in seconds.
   const allCodes = [];
   const errorFiles = [];
   for (let f = 0; f < files.length; f++) {
     const file = files[f];
-    setImportStatus(`Scanning ${file.name} (${f + 1}/${files.length})…`);
+    setImportStatus(`Scanning ${f + 1} of ${files.length}: ${file.name}…`);
     try {
       const found = await scanPdf(file);
       console.log(`[wallet] ${file.name}: found ${found.length} code(s)`);
@@ -95,6 +96,10 @@ async function importFiles(files) {
       console.error('PDF scan failed', file.name, e);
       errorFiles.push(`${file.name} (${e.message || e})`);
     }
+    // Give the browser room to GC the rendered canvases / PDF.js buffers
+    // before we start the next file. Critical for batches >8 PDFs.
+    await yieldUI();
+    await new Promise(r => setTimeout(r, 30));
   }
 
   // De-dup against already-saved cards
@@ -188,44 +193,67 @@ async function scanPdf(file) {
   const found = [];
   const seenForFile = new Set();
 
-  for (let p = 1; p <= pdf.numPages; p++) {
-    const page = await pdf.getPage(p);
+  try {
+    for (let p = 1; p <= pdf.numPages; p++) {
+      // Yield to the UI thread so the browser can paint progress / run GC.
+      await yieldUI();
 
-    let pageText = '';
-    try {
-      const tc = await page.getTextContent();
-      pageText = tc.items.map(i => i.str).join(' ');
-    } catch {}
+      const page = await pdf.getPage(p);
+      try {
+        let pageText = '';
+        try {
+          const tc = await page.getTextContent();
+          pageText = tc.items.map(i => i.str).join(' ');
+        } catch {}
 
-    const codes = await detectCodesOnPage(page, p);
-    if (!codes.length) {
-      console.log(`[wallet] page ${p}: no QR / barcode detected`);
-      continue;
+        const codes = await detectCodesOnPage(page, p);
+        if (!codes.length) {
+          console.log(`[wallet] page ${p}: no QR / barcode detected`);
+          continue;
+        }
+
+        const detectedValue = detectValue(pageText);
+        console.log(`[wallet] page ${p}: ${codes.length} code(s), detectedValue=${detectedValue}`);
+        for (const c of codes) {
+          if (seenForFile.has(c.data)) continue;
+          seenForFile.add(c.data);
+          found.push({ data: c.data, format: c.format, value: detectedValue, page: p });
+        }
+      } finally {
+        try { page.cleanup(); } catch {}
+      }
     }
-
-    const detectedValue = detectValue(pageText);
-    console.log(`[wallet] page ${p}: ${codes.length} code(s), detectedValue=${detectedValue}`);
-    for (const c of codes) {
-      if (seenForFile.has(c.data)) continue;
-      seenForFile.add(c.data);
-      found.push({ data: c.data, format: c.format, value: detectedValue, page: p });
-    }
+  } finally {
+    // Release every page + the worker-side document. Critical for batches >5 PDFs.
+    try { await pdf.cleanup(); } catch {}
+    try { await pdf.destroy(); } catch {}
   }
   return found;
 }
 
+function yieldUI() {
+  return new Promise(r => setTimeout(r, 0));
+}
+
+function releaseCanvas(canvas) {
+  // The standard trick to force the browser to free the canvas backing store.
+  if (!canvas) return;
+  try { canvas.width = 0; canvas.height = 0; } catch {}
+}
+
 /* ----------------------- Code detection (QR + 1D barcodes) ----------------------- */
 async function detectCodesOnPage(page, pageNum) {
-  const scales = [3, 2, 4, 1.5, 5];
+  // Fewer / lower scales — high scales cost ~50 MB per canvas and we don't need them.
+  const scales = [2.5, 1.5, 3.5];
   const seen = new Map(); // data -> { data, format }
-  const found = () => [...seen.values()];
 
   for (const scale of scales) {
     const vp = page.getViewport({ scale });
     const w = Math.floor(vp.width), h = Math.floor(vp.height);
-    if (w * h > 36_000_000) continue;
+    // Cap canvas at ~16 megapixels so a single page can't blow up mobile memory.
+    if (w * h > 16_000_000) continue;
 
-    const canvas = document.createElement('canvas');
+    let canvas = document.createElement('canvas');
     canvas.width = w; canvas.height = h;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     ctx.fillStyle = '#ffffff';
@@ -234,68 +262,79 @@ async function detectCodesOnPage(page, pageNum) {
       await page.render({ canvasContext: ctx, viewport: vp, background: 'rgba(255,255,255,1)' }).promise;
     } catch (e) {
       console.warn(`[wallet] render failed at scale ${scale}`, e);
+      releaseCanvas(canvas);
       continue;
     }
 
-    // --- Pass 1: jsQR over whole page (fast QR detection)
-    {
-      const img = ctx.getImageData(0, 0, w, h);
-      const c = jsQR(img.data, img.width, img.height, { inversionAttempts: 'attemptBoth' });
-      if (c && c.data && !seen.has(c.data)) seen.set(c.data, { data: c.data, format: 'QR_CODE' });
-    }
+    try {
+      // --- Pass 1: jsQR over whole page (fast QR)
+      {
+        const img = ctx.getImageData(0, 0, w, h);
+        const c = jsQR(img.data, img.width, img.height, { inversionAttempts: 'attemptBoth' });
+        if (c && c.data && !seen.has(c.data)) seen.set(c.data, { data: c.data, format: 'QR_CODE' });
+      }
 
-    // --- Pass 2: ZXing over whole page (QR + barcodes)
-    const z = decodeWithZXing(canvas);
-    if (z && !seen.has(z.data)) seen.set(z.data, z);
+      // --- Pass 2: ZXing over whole page (QR + 1D barcodes)
+      if (!seen.size) {
+        const z = decodeWithZXing(canvas);
+        if (z && !seen.has(z.data)) seen.set(z.data, z);
+      }
 
-    // --- Pass 3: tile scan — picks up small / multiple codes per page
-    const tile = 700;
-    const step = Math.floor(tile * 0.6);
-    if (w > tile || h > tile) {
-      for (let y = 0; y < h; y += step) {
-        for (let x = 0; x < w; x += step) {
-          const tw = Math.min(tile, w - x);
-          const th = Math.min(tile, h - y);
-          if (tw < 120 || th < 120) continue;
-
-          // jsQR on tile
-          const img = ctx.getImageData(x, y, tw, th);
-          const c = jsQR(img.data, img.width, img.height, { inversionAttempts: 'attemptBoth' });
-          if (c && c.data && !seen.has(c.data)) seen.set(c.data, { data: c.data, format: 'QR_CODE' });
-
-          // ZXing on tile (needs a real canvas)
-          const tileCanvas = document.createElement('canvas');
-          tileCanvas.width = tw; tileCanvas.height = th;
-          tileCanvas.getContext('2d').drawImage(canvas, x, y, tw, th, 0, 0, tw, th);
-          const zt = decodeWithZXing(tileCanvas);
-          if (zt && !seen.has(zt.data)) seen.set(zt.data, zt);
+      // --- Pass 3: horizontal / vertical strips — most barcode PDFs decode here
+      if (!seen.size) {
+        const strips = [
+          { x: 0, y: 0,                  w, h: Math.floor(h / 2) },
+          { x: 0, y: Math.floor(h / 3),  w, h: Math.floor(h / 2) },
+          { x: 0, y: Math.floor(h / 2),  w, h: Math.ceil(h / 2) },
+          { x: 0,                  y: 0, w: Math.floor(w / 2), h },
+          { x: Math.floor(w / 2),  y: 0, w: Math.ceil(w / 2),  h },
+        ];
+        for (const r of strips) {
+          if (seen.size) break;
+          const sc = document.createElement('canvas');
+          sc.width = r.w; sc.height = r.h;
+          sc.getContext('2d').drawImage(canvas, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+          const zs = decodeWithZXing(sc);
+          releaseCanvas(sc);
+          if (zs && !seen.has(zs.data)) seen.set(zs.data, zs);
         }
       }
-    }
 
-    // 1D barcodes are very sensitive to aspect: try horizontal & vertical strips too
-    if (!found().length || found().every(c => c.format === 'QR_CODE')) {
-      const strips = [
-        // Horizontal strips (most barcodes are horizontal)
-        { x: 0, y: 0,            w, h: Math.floor(h / 2) },
-        { x: 0, y: Math.floor(h / 3), w, h: Math.floor(h / 2) },
-        { x: 0, y: Math.floor(h / 2), w, h: Math.ceil(h / 2) },
-        // Vertical strips
-        { x: 0,            y: 0, w: Math.floor(w / 2), h },
-        { x: Math.floor(w / 2), y: 0, w: Math.ceil(w / 2), h },
-      ];
-      for (const r of strips) {
-        const sc = document.createElement('canvas');
-        sc.width = r.w; sc.height = r.h;
-        sc.getContext('2d').drawImage(canvas, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
-        const zs = decodeWithZXing(sc);
-        if (zs && !seen.has(zs.data)) seen.set(zs.data, zs);
+      // --- Pass 4: tile scan — only as a last resort (most expensive)
+      if (!seen.size) {
+        const tile = 700;
+        const step = Math.floor(tile * 0.6);
+        outer:
+        for (let y = 0; y < h; y += step) {
+          for (let x = 0; x < w; x += step) {
+            const tw = Math.min(tile, w - x);
+            const th = Math.min(tile, h - y);
+            if (tw < 120 || th < 120) continue;
+
+            const imgT = ctx.getImageData(x, y, tw, th);
+            const ct = jsQR(imgT.data, imgT.width, imgT.height, { inversionAttempts: 'attemptBoth' });
+            if (ct && ct.data && !seen.has(ct.data)) {
+              seen.set(ct.data, { data: ct.data, format: 'QR_CODE' });
+              break outer;
+            }
+            const tileCanvas = document.createElement('canvas');
+            tileCanvas.width = tw; tileCanvas.height = th;
+            tileCanvas.getContext('2d').drawImage(canvas, x, y, tw, th, 0, 0, tw, th);
+            const zt = decodeWithZXing(tileCanvas);
+            releaseCanvas(tileCanvas);
+            if (zt && !seen.has(zt.data)) { seen.set(zt.data, zt); break outer; }
+          }
+        }
       }
+    } finally {
+      releaseCanvas(canvas);
+      canvas = null;
     }
 
-    if (seen.size) break;
+    if (seen.size) break;   // Found a code at this scale — don't try higher scales.
+    await yieldUI();
   }
-  return found();
+  return [...seen.values()];
 }
 
 /* ZXing wrapper: decode a single canvas, returning { data, format } or null. */
