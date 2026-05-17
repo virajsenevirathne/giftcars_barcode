@@ -40,101 +40,163 @@ function setImportStatus(msg, kind = '') {
   el.classList.remove('hidden');
 }
 
+/* ----------------------- PDF.js setup ----------------------- */
+let pdfjsReady = null;
+function ensurePdfJs() {
+  if (pdfjsReady) return pdfjsReady;
+  pdfjsReady = (async () => {
+    if (!window.pdfjsLib) throw new Error('pdf.js failed to load (network blocked?)');
+    if (!window.jsQR)     throw new Error('jsQR failed to load (network blocked?)');
+
+    // Try to use the web-worker. If it can't be loaded (e.g. file:// origin, CSP),
+    // fall back to running PDF.js on the main thread by disabling the worker.
+    try {
+      const url = window.__PDFJS_WORKER_URL__;
+      const resp = await fetch(url, { method: 'GET', mode: 'cors' });
+      if (!resp.ok) throw new Error('worker HTTP ' + resp.status);
+      // Construct a blob worker URL so it's same-origin (avoids file:// cross-origin block).
+      const code = await resp.text();
+      const blob = new Blob([code], { type: 'application/javascript' });
+      pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(blob);
+    } catch (err) {
+      console.warn('PDF.js worker unavailable, falling back to main-thread mode.', err);
+      // Disable the worker entirely; PDF.js will run synchronously on the main thread.
+      try { pdfjsLib.GlobalWorkerOptions.workerSrc = ''; } catch {}
+      try { pdfjsLib.GlobalWorkerOptions.workerPort = null; } catch {}
+      // PDF.js v3 still tries to spawn a worker unless disableWorker is true at getDocument time.
+    }
+  })();
+  return pdfjsReady;
+}
+
 /* ----------------------- PDF -> QR pipeline ----------------------- */
 async function importFiles(files) {
   if (!files || !files.length) return;
-  if (!window.pdfjsLib || !window.jsQR) {
-    setImportStatus('Libraries failed to load. Check your connection.', 'error');
+
+  try {
+    await ensurePdfJs();
+  } catch (e) {
+    setImportStatus('Setup failed: ' + e.message, 'error');
     return;
   }
 
-  let totalFound = 0, totalScanned = 0, errorFiles = [];
+  let totalFound = 0, errorFiles = [];
   for (let f = 0; f < files.length; f++) {
     const file = files[f];
     setImportStatus(`Scanning ${file.name} (${f + 1}/${files.length})…`);
     try {
       const found = await scanPdf(file);
+      console.log(`[wallet] ${file.name}: found ${found.length} QR(s)`);
       totalFound += found.length;
       for (const item of found) {
         await addCard(item.data, item.value, file.name, item.page);
       }
-      totalScanned++;
+      if (!found.length) errorFiles.push(`${file.name} (no QR found)`);
     } catch (e) {
       console.error('PDF scan failed', file.name, e);
-      errorFiles.push(file.name);
+      errorFiles.push(`${file.name} (${e.message || e})`);
     }
   }
   render();
-  if (errorFiles.length) {
-    setImportStatus(`Imported ${totalFound} card(s). Failed: ${errorFiles.join(', ')}`, 'error');
+  if (totalFound === 0) {
+    setImportStatus('No QR codes detected. ' + (errorFiles.join('; ') || 'Try a clearer PDF.'), 'error');
+  } else if (errorFiles.length) {
+    setImportStatus(`Imported ${totalFound} card(s). Issues: ${errorFiles.join('; ')}`, 'error');
   } else {
-    setImportStatus(`Imported ${totalFound} card(s) from ${totalScanned} PDF(s).`, 'success');
+    setImportStatus(`Imported ${totalFound} card(s) from ${files.length} PDF(s).`, 'success');
   }
-  setTimeout(() => setImportStatus(''), 4500);
+  setTimeout(() => setImportStatus(''), 8000);
+}
+
+async function loadPdf(buf) {
+  // First attempt: with worker (or whatever workerSrc is set to).
+  try {
+    return await pdfjsLib.getDocument({ data: buf }).promise;
+  } catch (e1) {
+    console.warn('getDocument failed, retrying with disableWorker:true', e1);
+    // Retry forcing no worker — works around blob-worker / CSP issues.
+    return await pdfjsLib.getDocument({ data: buf, disableWorker: true, isEvalSupported: false }).promise;
+  }
 }
 
 async function scanPdf(file) {
   const buf = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  // Re-slice into a fresh ArrayBuffer so a retry isn't blocked by a detached buffer.
+  const data = new Uint8Array(buf.slice(0));
+  const pdf = await loadPdf(data);
   const found = [];
+  const seenForFile = new Set();
 
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
 
-    // Extract text first to look for monetary values on this page.
     let pageText = '';
     try {
       const tc = await page.getTextContent();
       pageText = tc.items.map(i => i.str).join(' ');
     } catch {}
 
-    // Render page at high scale for QR detection.
-    const qrPayloads = await detectQRsOnPage(page);
-    if (!qrPayloads.length) continue;
+    const qrPayloads = await detectQRsOnPage(page, p);
+    if (!qrPayloads.length) {
+      console.log(`[wallet] page ${p}: no QR detected`);
+      continue;
+    }
 
     const detectedValue = detectValue(pageText);
+    console.log(`[wallet] page ${p}: ${qrPayloads.length} QR(s), detectedValue=${detectedValue}`);
     for (const data of qrPayloads) {
+      if (seenForFile.has(data)) continue;
+      seenForFile.add(data);
       found.push({ data, value: detectedValue, page: p });
     }
   }
   return found;
 }
 
-async function detectQRsOnPage(page) {
-  // Try multiple scales; gift card QRs vary in size on the page.
-  const scales = [2.5, 1.5, 3.5];
+async function detectQRsOnPage(page, pageNum) {
+  // Try multiple scales; gift-card QRs vary wildly in size on the page.
+  const scales = [3, 2, 4, 1.5, 5];
   const seen = new Set();
   const out = [];
+
   for (const scale of scales) {
     const vp = page.getViewport({ scale });
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.floor(vp.width);
-    canvas.height = Math.floor(vp.height);
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    const w = Math.floor(vp.width), h = Math.floor(vp.height);
+    // Guard against absurdly large allocations
+    if (w * h > 36_000_000) continue;
 
-    // Whole-page scan
-    const fullData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const code = jsQR(fullData.data, fullData.width, fullData.height, { inversionAttempts: 'dontInvert' });
-    if (code && code.data && !seen.has(code.data)) {
-      seen.add(code.data);
-      out.push(code.data);
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    // White background so transparent PDFs scan correctly
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, w, h);
+    try {
+      await page.render({ canvasContext: ctx, viewport: vp, background: 'rgba(255,255,255,1)' }).promise;
+    } catch (e) {
+      console.warn(`[wallet] render failed at scale ${scale}`, e);
+      continue;
     }
 
-    // Tile scan to catch multiple QRs or small QRs on the same page
-    const tile = 800;
-    if (canvas.width > tile || canvas.height > tile) {
-      for (let y = 0; y < canvas.height; y += tile * 0.75) {
-        for (let x = 0; x < canvas.width; x += tile * 0.75) {
-          const w = Math.min(tile, canvas.width - x);
-          const h = Math.min(tile, canvas.height - y);
-          if (w < 120 || h < 120) continue;
-          const img = ctx.getImageData(x, y, w, h);
+    // 1) Whole-page scan, both inversions
+    {
+      const img = ctx.getImageData(0, 0, w, h);
+      const c = jsQR(img.data, img.width, img.height, { inversionAttempts: 'attemptBoth' });
+      if (c && c.data && !seen.has(c.data)) { seen.add(c.data); out.push(c.data); }
+    }
+
+    // 2) Tile scan — finds multiple QRs per page and small QRs
+    const tile = 700;
+    const step = Math.floor(tile * 0.6);
+    if (w > tile || h > tile) {
+      for (let y = 0; y < h; y += step) {
+        for (let x = 0; x < w; x += step) {
+          const tw = Math.min(tile, w - x);
+          const th = Math.min(tile, h - y);
+          if (tw < 120 || th < 120) continue;
+          const img = ctx.getImageData(x, y, tw, th);
           const c = jsQR(img.data, img.width, img.height, { inversionAttempts: 'attemptBoth' });
-          if (c && c.data && !seen.has(c.data)) {
-            seen.add(c.data);
-            out.push(c.data);
-          }
+          if (c && c.data && !seen.has(c.data)) { seen.add(c.data); out.push(c.data); }
         }
       }
     }
@@ -395,7 +457,12 @@ function wireUp() {
   $('#pdfInput').addEventListener('change', async (e) => {
     const files = [...e.target.files];
     e.target.value = ''; // allow re-selecting the same file later
-    await importFiles(files);
+    try {
+      await importFiles(files);
+    } catch (err) {
+      console.error('Import threw', err);
+      setImportStatus('Import error: ' + (err && err.message ? err.message : err), 'error');
+    }
   });
 
   // Group toggle

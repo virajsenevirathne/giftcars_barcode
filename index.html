@@ -24,7 +24,7 @@
       <label class="btn primary" for="pdfInput">
         <span class="icon">＋</span><span class="lbl">Import PDF</span>
       </label>
-      <input id="pdfInput" type="file" accept="application/pdf" multiple hidden />
+      <input id="pdfInput" type="file" accept="application/pdf,.pdf" multiple hidden />
       <button id="menuBtn" class="btn ghost icon-only" title="Menu">⋯</button>
     </div>
   </header>
@@ -111,13 +111,18 @@
   </div>
 
   <!-- Libraries (CDN) -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+  <!-- Use the "legacy" build of pdf.js: widest browser support, works from file:// when worker is disabled. -->
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
   <script>
-    if (window.pdfjsLib) {
-      pdfjsLib.GlobalWorkerOptions.workerSrc =
-        'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    window.__PDFJS_WORKER_URL__ =
+      'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.worker.min.js';
+    if (window['pdfjs-dist/build/pdf'] && !window.pdfjsLib) {
+      window.pdfjsLib = window['pdfjs-dist/build/pdf'];
+    }
+    if (window.pdfjsLib && window.pdfjsLib.GlobalWorkerOptions) {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = window.__PDFJS_WORKER_URL__;
     }
   </script>
   <script src="app.js"></script>
