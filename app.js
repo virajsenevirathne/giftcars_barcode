@@ -301,11 +301,11 @@ function detectValue(text) {
 
 async function addCard(data, detectedValue, source, page, format) {
   if (state.cards.some(c => c.data === data)) return;
-  let value = detectedValue;
-  if (value == null) {
-    value = await promptForValue(data, source, page, format);
-    if (value == null) return;
-  }
+  // Always ask the user — auto-detection from PDF text is too unreliable
+  // (e.g. "$50 minimum purchase" in T&Cs gets misread as the card value).
+  // The detected value is pre-filled as a suggestion they can accept or override.
+  const value = await promptForValue(data, source, page, format, detectedValue);
+  if (value == null) return;
   state.cards.push({
     id: uid(),
     data,
@@ -319,15 +319,23 @@ async function addCard(data, detectedValue, source, page, format) {
   saveCards();
 }
 
-function promptForValue(data, source, page, format) {
+function promptForValue(data, source, page, format, suggested) {
   return new Promise((resolve) => {
     state.pendingValuePrompt = { data, source, page, resolve };
     const fmtLabel = friendlyFormat(format);
-    $('#valueModalSub').textContent =
-      `Couldn't detect a value for ${fmtLabel} on ${source || 'PDF'}${page ? ' page ' + page : ''}. Enter it manually:`;
-    $('#valueInput').value = '';
+    const where = `${source || 'PDF'}${page ? ' page ' + page : ''}`;
+    $('#valueModalTitle').textContent = 'Card value';
+    if (suggested != null) {
+      $('#valueModalSub').textContent =
+        `Detected ${fmtLabel} on ${where}. Suggested value: ${fmt(suggested)} — confirm or change:`;
+    } else {
+      $('#valueModalSub').textContent =
+        `Detected ${fmtLabel} on ${where}. Enter the card's value:`;
+    }
+    const input = $('#valueInput');
+    input.value = suggested != null ? String(suggested) : '';
     showModal('#valueModal');
-    setTimeout(() => $('#valueInput').focus(), 100);
+    setTimeout(() => { input.focus(); input.select(); }, 100);
   });
 }
 
