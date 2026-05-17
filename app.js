@@ -89,7 +89,7 @@ async function importFiles(files) {
       console.log(`[wallet] ${file.name}: found ${found.length} QR(s)`);
       totalFound += found.length;
       for (const item of found) {
-        await addCard(item.data, item.value, file.name, item.page);
+        await addCard(item.data, item.value, file.name, item.page, item.format);
       }
       if (!found.length) errorFiles.push(`${file.name} (no QR found)`);
     } catch (e) {
@@ -136,39 +136,37 @@ async function scanPdf(file) {
       pageText = tc.items.map(i => i.str).join(' ');
     } catch {}
 
-    const qrPayloads = await detectQRsOnPage(page, p);
-    if (!qrPayloads.length) {
-      console.log(`[wallet] page ${p}: no QR detected`);
+    const codes = await detectCodesOnPage(page, p);
+    if (!codes.length) {
+      console.log(`[wallet] page ${p}: no QR / barcode detected`);
       continue;
     }
 
     const detectedValue = detectValue(pageText);
-    console.log(`[wallet] page ${p}: ${qrPayloads.length} QR(s), detectedValue=${detectedValue}`);
-    for (const data of qrPayloads) {
-      if (seenForFile.has(data)) continue;
-      seenForFile.add(data);
-      found.push({ data, value: detectedValue, page: p });
+    console.log(`[wallet] page ${p}: ${codes.length} code(s), detectedValue=${detectedValue}`);
+    for (const c of codes) {
+      if (seenForFile.has(c.data)) continue;
+      seenForFile.add(c.data);
+      found.push({ data: c.data, format: c.format, value: detectedValue, page: p });
     }
   }
   return found;
 }
 
-async function detectQRsOnPage(page, pageNum) {
-  // Try multiple scales; gift-card QRs vary wildly in size on the page.
+/* ----------------------- Code detection (QR + 1D barcodes) ----------------------- */
+async function detectCodesOnPage(page, pageNum) {
   const scales = [3, 2, 4, 1.5, 5];
-  const seen = new Set();
-  const out = [];
+  const seen = new Map(); // data -> { data, format }
+  const found = () => [...seen.values()];
 
   for (const scale of scales) {
     const vp = page.getViewport({ scale });
     const w = Math.floor(vp.width), h = Math.floor(vp.height);
-    // Guard against absurdly large allocations
     if (w * h > 36_000_000) continue;
 
     const canvas = document.createElement('canvas');
     canvas.width = w; canvas.height = h;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    // White background so transparent PDFs scan correctly
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, w, h);
     try {
@@ -178,14 +176,18 @@ async function detectQRsOnPage(page, pageNum) {
       continue;
     }
 
-    // 1) Whole-page scan, both inversions
+    // --- Pass 1: jsQR over whole page (fast QR detection)
     {
       const img = ctx.getImageData(0, 0, w, h);
       const c = jsQR(img.data, img.width, img.height, { inversionAttempts: 'attemptBoth' });
-      if (c && c.data && !seen.has(c.data)) { seen.add(c.data); out.push(c.data); }
+      if (c && c.data && !seen.has(c.data)) seen.set(c.data, { data: c.data, format: 'QR_CODE' });
     }
 
-    // 2) Tile scan — finds multiple QRs per page and small QRs
+    // --- Pass 2: ZXing over whole page (QR + barcodes)
+    const z = decodeWithZXing(canvas);
+    if (z && !seen.has(z.data)) seen.set(z.data, z);
+
+    // --- Pass 3: tile scan — picks up small / multiple codes per page
     const tile = 700;
     const step = Math.floor(tile * 0.6);
     if (w > tile || h > tile) {
@@ -194,16 +196,88 @@ async function detectQRsOnPage(page, pageNum) {
           const tw = Math.min(tile, w - x);
           const th = Math.min(tile, h - y);
           if (tw < 120 || th < 120) continue;
+
+          // jsQR on tile
           const img = ctx.getImageData(x, y, tw, th);
           const c = jsQR(img.data, img.width, img.height, { inversionAttempts: 'attemptBoth' });
-          if (c && c.data && !seen.has(c.data)) { seen.add(c.data); out.push(c.data); }
+          if (c && c.data && !seen.has(c.data)) seen.set(c.data, { data: c.data, format: 'QR_CODE' });
+
+          // ZXing on tile (needs a real canvas)
+          const tileCanvas = document.createElement('canvas');
+          tileCanvas.width = tw; tileCanvas.height = th;
+          tileCanvas.getContext('2d').drawImage(canvas, x, y, tw, th, 0, 0, tw, th);
+          const zt = decodeWithZXing(tileCanvas);
+          if (zt && !seen.has(zt.data)) seen.set(zt.data, zt);
         }
       }
     }
 
-    if (out.length) break; // good enough
+    // 1D barcodes are very sensitive to aspect: try horizontal & vertical strips too
+    if (!found().length || found().every(c => c.format === 'QR_CODE')) {
+      const strips = [
+        // Horizontal strips (most barcodes are horizontal)
+        { x: 0, y: 0,            w, h: Math.floor(h / 2) },
+        { x: 0, y: Math.floor(h / 3), w, h: Math.floor(h / 2) },
+        { x: 0, y: Math.floor(h / 2), w, h: Math.ceil(h / 2) },
+        // Vertical strips
+        { x: 0,            y: 0, w: Math.floor(w / 2), h },
+        { x: Math.floor(w / 2), y: 0, w: Math.ceil(w / 2), h },
+      ];
+      for (const r of strips) {
+        const sc = document.createElement('canvas');
+        sc.width = r.w; sc.height = r.h;
+        sc.getContext('2d').drawImage(canvas, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+        const zs = decodeWithZXing(sc);
+        if (zs && !seen.has(zs.data)) seen.set(zs.data, zs);
+      }
+    }
+
+    if (seen.size) break;
   }
-  return out;
+  return found();
+}
+
+/* ZXing wrapper: decode a single canvas, returning { data, format } or null. */
+function decodeWithZXing(canvas) {
+  if (!window.ZXing) return null;
+  const Z = window.ZXing;
+  try {
+    const hints = new Map();
+    hints.set(Z.DecodeHintType.TRY_HARDER, true);
+    hints.set(Z.DecodeHintType.POSSIBLE_FORMATS, [
+      Z.BarcodeFormat.QR_CODE,
+      Z.BarcodeFormat.CODE_128,
+      Z.BarcodeFormat.CODE_39,
+      Z.BarcodeFormat.CODE_93,
+      Z.BarcodeFormat.EAN_13,
+      Z.BarcodeFormat.EAN_8,
+      Z.BarcodeFormat.UPC_A,
+      Z.BarcodeFormat.UPC_E,
+      Z.BarcodeFormat.ITF,
+      Z.BarcodeFormat.CODABAR,
+      Z.BarcodeFormat.DATA_MATRIX,
+      Z.BarcodeFormat.AZTEC,
+      Z.BarcodeFormat.PDF_417,
+    ]);
+    const reader = new Z.MultiFormatReader();
+    reader.setHints(hints);
+    const source = new Z.HTMLCanvasElementLuminanceSource(canvas);
+    const bitmap = new Z.BinaryBitmap(new Z.HybridBinarizer(source));
+    const result = reader.decode(bitmap);
+    return {
+      data: result.getText(),
+      format: zxingFormatName(result.getBarcodeFormat()),
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+function zxingFormatName(fmt) {
+  if (!window.ZXing) return 'UNKNOWN';
+  const BF = window.ZXing.BarcodeFormat;
+  for (const k of Object.keys(BF)) if (BF[k] === fmt) return k;
+  return 'UNKNOWN';
 }
 
 function detectValue(text) {
@@ -225,17 +299,17 @@ function detectValue(text) {
   return null;
 }
 
-async function addCard(data, detectedValue, source, page) {
-  // De-dup by QR payload
+async function addCard(data, detectedValue, source, page, format) {
   if (state.cards.some(c => c.data === data)) return;
   let value = detectedValue;
   if (value == null) {
-    value = await promptForValue(data, source, page);
-    if (value == null) return; // user skipped
+    value = await promptForValue(data, source, page, format);
+    if (value == null) return;
   }
   state.cards.push({
     id: uid(),
     data,
+    format: format || 'QR_CODE',
     value: Number(value),
     used: false,
     source: source || '',
@@ -245,14 +319,34 @@ async function addCard(data, detectedValue, source, page) {
   saveCards();
 }
 
-function promptForValue(data, source, page) {
+function promptForValue(data, source, page, format) {
   return new Promise((resolve) => {
     state.pendingValuePrompt = { data, source, page, resolve };
-    $('#valueModalSub').textContent = `Couldn't detect a value for QR on ${source || 'PDF'}${page ? ' page ' + page : ''}. Enter it manually:`;
+    const fmtLabel = friendlyFormat(format);
+    $('#valueModalSub').textContent =
+      `Couldn't detect a value for ${fmtLabel} on ${source || 'PDF'}${page ? ' page ' + page : ''}. Enter it manually:`;
     $('#valueInput').value = '';
     showModal('#valueModal');
     setTimeout(() => $('#valueInput').focus(), 100);
   });
+}
+
+function friendlyFormat(format) {
+  if (!format || format === 'QR_CODE') return 'QR code';
+  return ({
+    CODE_128: 'Code 128 barcode',
+    CODE_39: 'Code 39 barcode',
+    CODE_93: 'Code 93 barcode',
+    EAN_13: 'EAN-13 barcode',
+    EAN_8: 'EAN-8 barcode',
+    UPC_A: 'UPC-A barcode',
+    UPC_E: 'UPC-E barcode',
+    ITF: 'ITF barcode',
+    CODABAR: 'Codabar barcode',
+    DATA_MATRIX: 'Data Matrix',
+    AZTEC: 'Aztec code',
+    PDF_417: 'PDF417 barcode',
+  })[format] || 'barcode';
 }
 
 /* ----------------------- Rendering ----------------------- */
@@ -346,7 +440,8 @@ function renderGrouped(container, list) {
 
 function makeCardEl(c) {
   const el = document.createElement('div');
-  el.className = 'card' + (c.used ? ' used' : '');
+  const isBarcode = c.format && c.format !== 'QR_CODE';
+  el.className = 'card' + (c.used ? ' used' : '') + (isBarcode ? ' is-barcode' : '');
   el.dataset.id = c.id;
   el.innerHTML = `
     <div class="used-stamp">USED</div>
@@ -356,9 +451,8 @@ function makeCardEl(c) {
       <button class="card-toggle" title="Toggle used" aria-label="Toggle used"></button>
     </div>
   `;
-  // Render QR
-  const qrHost = el.querySelector('.card-qr');
-  qrHost.appendChild(renderQR(c.data, 4));
+  const host = el.querySelector('.card-qr');
+  host.appendChild(renderCode(c.data, c.format || 'QR_CODE', false));
 
   // Click card -> open modal
   el.addEventListener('click', (e) => {
@@ -373,30 +467,37 @@ function makeCardEl(c) {
   return el;
 }
 
-function renderQR(data, cellSize = 4) {
-  // qrcode-generator library
+/* Format-aware renderer. Returns a DOM node that fills its parent. */
+function renderCode(data, format, isLarge) {
+  if (!format || format === 'QR_CODE') return renderQR(data);
+  const jsBarcodeFormat = {
+    CODE_128: 'CODE128',
+    CODE_39:  'CODE39',
+    CODE_93:  'CODE39', // JsBarcode has no Code93; fall back to Code39 rendering
+    EAN_13:   'EAN13',
+    EAN_8:    'EAN8',
+    UPC_A:    'UPC',
+    UPC_E:    'UPC',   // rendered as UPC (data may need conversion; we still display the text)
+    ITF:      'ITF',
+    CODABAR:  'codabar',
+  }[format];
+  if (jsBarcodeFormat) return renderBarcode(data, jsBarcodeFormat, isLarge);
+  return renderUnknown(data, format);
+}
+
+function renderQR(data) {
   let qr;
-  // Try error correction levels from high to low; high may overflow for very long data
   for (const ec of ['M', 'L', 'Q', 'H']) {
-    try {
-      // typeNumber 0 = auto
-      qr = qrcode(0, ec);
-      qr.addData(data);
-      qr.make();
-      break;
-    } catch (e) { qr = null; }
+    try { qr = qrcode(0, ec); qr.addData(data); qr.make(); break; }
+    catch (e) { qr = null; }
   }
   const wrap = document.createElement('div');
   wrap.style.width = '100%'; wrap.style.height = '100%';
   if (!qr) {
     wrap.textContent = 'QR error';
-    wrap.style.color = '#000';
-    wrap.style.display = 'flex';
-    wrap.style.alignItems = 'center';
-    wrap.style.justifyContent = 'center';
+    wrap.style.cssText = 'color:#000;display:flex;align-items:center;justify-content:center';
     return wrap;
   }
-  // Use SVG for crisp scaling
   wrap.innerHTML = qr.createSvgTag({ scalable: true, margin: 0 });
   const svg = wrap.querySelector('svg');
   if (svg) {
@@ -404,6 +505,60 @@ function renderQR(data, cellSize = 4) {
     svg.setAttribute('height', '100%');
     svg.style.display = 'block';
   }
+  return wrap;
+}
+
+function renderBarcode(data, format, isLarge) {
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:#fff;color:#000';
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  wrap.appendChild(svg);
+  if (!window.JsBarcode) {
+    wrap.textContent = data;
+    wrap.style.fontFamily = 'monospace';
+    wrap.style.fontSize = '11px';
+    wrap.style.wordBreak = 'break-all';
+    wrap.style.padding = '8px';
+    return wrap;
+  }
+  try {
+    JsBarcode(svg, data, {
+      format,
+      displayValue: true,
+      fontSize: isLarge ? 22 : 14,
+      margin: isLarge ? 12 : 4,
+      width: isLarge ? 3 : 2,
+      height: isLarge ? 140 : 70,
+      background: '#ffffff',
+      lineColor: '#000000',
+    });
+    svg.style.width = '100%';
+    svg.style.height = 'auto';
+    svg.style.maxHeight = '100%';
+    svg.style.display = 'block';
+  } catch (e) {
+    console.warn('Barcode render failed', format, e);
+    wrap.innerHTML = '';
+    wrap.textContent = data;
+    wrap.style.fontFamily = 'monospace';
+    wrap.style.fontSize = '11px';
+    wrap.style.wordBreak = 'break-all';
+    wrap.style.padding = '8px';
+  }
+  return wrap;
+}
+
+function renderUnknown(data, format) {
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#fff;color:#000;padding:10px;text-align:center';
+  const lbl = document.createElement('div');
+  lbl.textContent = friendlyFormat(format);
+  lbl.style.cssText = 'font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px';
+  const txt = document.createElement('div');
+  txt.textContent = data;
+  txt.style.cssText = 'font-family:monospace;font-size:12px;word-break:break-all';
+  wrap.appendChild(lbl);
+  wrap.appendChild(txt);
   return wrap;
 }
 
@@ -443,10 +598,12 @@ function openCardModal(id) {
   if (!c) return;
   activeCardId = id;
   $('#modalValue').textContent = fmt(c.value);
-  const qrHost = $('#modalQr');
-  qrHost.innerHTML = '';
-  qrHost.appendChild(renderQR(c.data, 8));
-  $('#modalData').textContent = c.data;
+  const host = $('#modalQr');
+  host.innerHTML = '';
+  const isBarcode = c.format && c.format !== 'QR_CODE';
+  host.classList.toggle('is-barcode', !!isBarcode);
+  host.appendChild(renderCode(c.data, c.format || 'QR_CODE', true));
+  $('#modalData').textContent = `${friendlyFormat(c.format)} · ${c.data}`;
   $('#toggleUsedBtn').textContent = c.used ? 'Mark unused' : 'Mark used';
   showModal('#qrModal');
 }
@@ -587,6 +744,7 @@ async function importBackup(e) {
       state.cards.push({
         id: c.id || uid(),
         data: c.data,
+        format: c.format || 'QR_CODE',
         value: Number(c.value),
         used: !!c.used,
         source: c.source || 'backup',

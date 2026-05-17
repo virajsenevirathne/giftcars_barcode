@@ -114,7 +114,12 @@
   <!-- Use the "legacy" build of pdf.js: widest browser support, works from file:// when worker is disabled. -->
   <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <!-- QR code renderer -->
   <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
+  <!-- ZXing: 1D + 2D barcode reader (Code128, EAN, UPC, ITF, Codabar, DataMatrix, PDF417, Aztec, QR...) -->
+  <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+  <!-- JsBarcode: render 1D barcodes (Code128, EAN, UPC, ITF, Codabar, MSI) -->
+  <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
   <script>
     window.__PDFJS_WORKER_URL__ =
       'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.worker.min.js';

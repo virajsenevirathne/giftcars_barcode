@@ -144,8 +144,17 @@ body { padding-top: var(--safe-top); padding-bottom: var(--safe-bottom); }
   padding: 8px;
   aspect-ratio: 1/1;
   display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
 }
 .card-qr svg, .card-qr canvas { width: 100%; height: 100%; display: block; }
+
+/* 1D barcodes are wider than tall — keep the same card height, let JsBarcode size to width */
+.card.is-barcode .card-qr {
+  aspect-ratio: auto;
+  height: 88px;
+  padding: 6px;
+}
+.card.is-barcode .card-qr svg { height: 100%; width: 100%; }
 
 .card-foot {
   display: flex; align-items: center; justify-content: space-between;
@@ -253,8 +262,17 @@ body { padding-top: var(--safe-top); padding-bottom: var(--safe-bottom); }
   width: min(82vw, 380px);
   height: min(82vw, 380px);
   display: flex; align-items: center; justify-content: center;
+  transition: height .2s ease;
 }
 .modal-qr svg, .modal-qr canvas { width: 100%; height: 100%; display: block; }
+/* Barcodes: wider, shorter */
+.modal-qr.is-barcode {
+  width: min(92vw, 460px);
+  height: auto;
+  min-height: 160px;
+  padding: 20px 14px;
+}
+.modal-qr.is-barcode svg { height: auto; max-height: 240px; }
 .modal-data {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11px;
