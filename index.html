@@ -84,6 +84,32 @@
     </div>
   </div>
 
+  <!-- Batch value prompt (multi-card import) -->
+  <div id="batchValueModal" class="modal hidden">
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-sheet small">
+      <button class="modal-close" data-close>×</button>
+      <h3 id="batchTitle">Imported cards</h3>
+      <p class="muted" id="batchSub">Set one value to apply to every card, or ask per card.</p>
+      <div class="value-input-row">
+        <span class="currency">$</span>
+        <input type="number" id="batchValueInput" min="0" step="1" placeholder="Same value for all" inputmode="numeric" />
+      </div>
+      <div class="quick-values">
+        <button class="chip" data-v="10">$10</button>
+        <button class="chip" data-v="20">$20</button>
+        <button class="chip" data-v="25">$25</button>
+        <button class="chip" data-v="30">$30</button>
+        <button class="chip" data-v="50">$50</button>
+        <button class="chip" data-v="100">$100</button>
+      </div>
+      <div class="modal-actions">
+        <button class="btn ghost" id="batchPerCardBtn">Ask per card</button>
+        <button class="btn primary" id="batchOkBtn">Use for all</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Value prompt modal -->
   <div id="valueModal" class="modal hidden">
     <div class="modal-backdrop" data-close></div>

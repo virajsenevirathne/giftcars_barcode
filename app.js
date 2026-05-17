@@ -80,32 +80,93 @@ async function importFiles(files) {
     return;
   }
 
-  let totalFound = 0, errorFiles = [];
+  // Phase 1: scan every PDF, collect all detected codes (no prompts yet)
+  const allCodes = [];
+  const errorFiles = [];
   for (let f = 0; f < files.length; f++) {
     const file = files[f];
     setImportStatus(`Scanning ${file.name} (${f + 1}/${files.length})…`);
     try {
       const found = await scanPdf(file);
-      console.log(`[wallet] ${file.name}: found ${found.length} QR(s)`);
-      totalFound += found.length;
-      for (const item of found) {
-        await addCard(item.data, item.value, file.name, item.page, item.format);
-      }
-      if (!found.length) errorFiles.push(`${file.name} (no QR found)`);
+      console.log(`[wallet] ${file.name}: found ${found.length} code(s)`);
+      for (const item of found) allCodes.push({ ...item, source: file.name });
+      if (!found.length) errorFiles.push(`${file.name} (no code found)`);
     } catch (e) {
       console.error('PDF scan failed', file.name, e);
       errorFiles.push(`${file.name} (${e.message || e})`);
     }
   }
-  render();
-  if (totalFound === 0) {
-    setImportStatus('No QR codes detected. ' + (errorFiles.join('; ') || 'Try a clearer PDF.'), 'error');
-  } else if (errorFiles.length) {
-    setImportStatus(`Imported ${totalFound} card(s). Issues: ${errorFiles.join('; ')}`, 'error');
-  } else {
-    setImportStatus(`Imported ${totalFound} card(s) from ${files.length} PDF(s).`, 'success');
+
+  // De-dup against already-saved cards
+  const newCodes = allCodes.filter(c => !state.cards.some(x => x.data === c.data));
+  const dupCount = allCodes.length - newCodes.length;
+
+  if (!newCodes.length) {
+    const msg = allCodes.length
+      ? `All ${allCodes.length} code(s) were already imported.`
+      : `No codes detected. ${errorFiles.join('; ') || 'Try a clearer PDF.'}`;
+    setImportStatus(msg, allCodes.length ? 'success' : 'error');
+    setTimeout(() => setImportStatus(''), 6000);
+    return;
   }
+
+  // Phase 2: if 2+ new cards, offer one batch value for all
+  let batchValue = null;
+  if (newCodes.length > 1) {
+    setImportStatus(`Found ${newCodes.length} card(s) across ${files.length} PDF(s). Set value…`);
+    batchValue = await promptBatchValue(newCodes.length, files.length);
+    // batchValue: number = use for all; null = ask per card
+  }
+
+  // Phase 3: save cards (one prompt per card if no batch value)
+  let added = 0;
+  for (const item of newCodes) {
+    const ok = await saveImportedCard(item, batchValue);
+    if (ok) added++;
+  }
+  render();
+
+  const parts = [`Imported ${added} card(s)`];
+  if (dupCount)      parts.push(`${dupCount} already existed`);
+  if (errorFiles.length) parts.push(`issues: ${errorFiles.join('; ')}`);
+  setImportStatus(parts.join(' · '), errorFiles.length ? 'error' : 'success');
   setTimeout(() => setImportStatus(''), 8000);
+}
+
+async function saveImportedCard(item, batchValue) {
+  let value;
+  if (batchValue != null) {
+    value = batchValue;
+  } else {
+    value = await promptForValue(item.data, item.source, item.page, item.format, item.value);
+    if (value == null) return false;
+  }
+  state.cards.push({
+    id: uid(),
+    data: item.data,
+    format: item.format || 'QR_CODE',
+    value: Number(value),
+    used: false,
+    source: item.source || '',
+    page: item.page || 1,
+    createdAt: Date.now(),
+  });
+  saveCards();
+  return true;
+}
+
+function promptBatchValue(cardCount, fileCount) {
+  return new Promise((resolve) => {
+    state.pendingBatchPrompt = resolve;
+    $('#batchTitle').textContent =
+      `Importing ${cardCount} card${cardCount === 1 ? '' : 's'}`;
+    $('#batchSub').textContent =
+      `Found ${cardCount} card${cardCount === 1 ? '' : 's'} across ${fileCount} PDF${fileCount === 1 ? '' : 's'}. ` +
+      `Set one value to apply to every card, or tap "Ask per card" to enter them individually.`;
+    $('#batchValueInput').value = '';
+    showModal('#batchValueModal');
+    setTimeout(() => { const i = $('#batchValueInput'); i.focus(); i.select(); }, 100);
+  });
 }
 
 async function loadPdf(buf) {
@@ -297,26 +358,6 @@ function detectValue(text) {
     }
   }
   return null;
-}
-
-async function addCard(data, detectedValue, source, page, format) {
-  if (state.cards.some(c => c.data === data)) return;
-  // Always ask the user — auto-detection from PDF text is too unreliable
-  // (e.g. "$50 minimum purchase" in T&Cs gets misread as the card value).
-  // The detected value is pre-filled as a suggestion they can accept or override.
-  const value = await promptForValue(data, source, page, format, detectedValue);
-  if (value == null) return;
-  state.cards.push({
-    id: uid(),
-    data,
-    format: format || 'QR_CODE',
-    value: Number(value),
-    used: false,
-    source: source || '',
-    page: page || 1,
-    createdAt: Date.now(),
-  });
-  saveCards();
 }
 
 function promptForValue(data, source, page, format, suggested) {
@@ -690,23 +731,23 @@ function wireUp() {
   });
 
   // Modal close handlers (any [data-close])
-  document.addEventListener('click', (e) => {
-    if (e.target.matches('[data-close]')) {
-      hideAllModals();
-      if (state.pendingValuePrompt) {
-        state.pendingValuePrompt.resolve(null);
-        state.pendingValuePrompt = null;
-      }
+  const closeAllAndResolvePrompts = () => {
+    hideAllModals();
+    if (state.pendingValuePrompt) {
+      state.pendingValuePrompt.resolve(null);
+      state.pendingValuePrompt = null;
     }
+    if (state.pendingBatchPrompt) {
+      // Treat dismissal as "ask per card"
+      state.pendingBatchPrompt(null);
+      state.pendingBatchPrompt = null;
+    }
+  };
+  document.addEventListener('click', (e) => {
+    if (e.target.matches('[data-close]')) closeAllAndResolvePrompts();
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      hideAllModals();
-      if (state.pendingValuePrompt) {
-        state.pendingValuePrompt.resolve(null);
-        state.pendingValuePrompt = null;
-      }
-    }
+    if (e.key === 'Escape') closeAllAndResolvePrompts();
   });
 
   // Card modal actions
@@ -749,6 +790,29 @@ function wireUp() {
       state.pendingValuePrompt = null;
     }
     hideModal('#valueModal');
+  });
+
+  // Batch value modal (multi-PDF import)
+  $('#batchValueModal').querySelectorAll('.chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      $('#batchValueInput').value = chip.dataset.v;
+    });
+  });
+  $('#batchOkBtn').addEventListener('click', () => {
+    const v = parseFloat($('#batchValueInput').value);
+    if (isNaN(v) || v < 0) { alert('Enter a valid value, or tap "Ask per card".'); return; }
+    if (state.pendingBatchPrompt) {
+      state.pendingBatchPrompt(v);
+      state.pendingBatchPrompt = null;
+    }
+    hideModal('#batchValueModal');
+  });
+  $('#batchPerCardBtn').addEventListener('click', () => {
+    if (state.pendingBatchPrompt) {
+      state.pendingBatchPrompt(null);
+      state.pendingBatchPrompt = null;
+    }
+    hideModal('#batchValueModal');
   });
 }
 
